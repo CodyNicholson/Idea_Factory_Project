@@ -1,4 +1,4 @@
-"""Curated, deeply-researched product blueprints grounded in Claude_Skills_Project and Business_Analyzer_Project."""
+"""Builds a scored ProductIdea from founder estimates and the 14 diligence answers."""
 from __future__ import annotations
 
 import re
@@ -215,22 +215,3 @@ def unit_economics_narratives(
         "burn_rate_and_runway": burn_text,
         "usage_and_retention_metrics": retention_text,
     }
-
-
-def get_seed_ideas() -> list[ProductIdea]:
-    """Load all modular product idea packs."""
-    from .packs.pack_1_supply_chain_and_aiops import IDEAS_PACK_1
-    from .packs.pack_2_vertical_trades_and_healthcare import IDEAS_PACK_2
-    from .packs.pack_3_agentic_devtools_and_skills import IDEAS_PACK_3
-    from .packs.pack_4_fintech_proptech_and_actuarial import IDEAS_PACK_4
-    from .packs.pack_5_edtech_visual_labs_and_gaming import IDEAS_PACK_5
-
-    all_ideas = (
-        IDEAS_PACK_1
-        + IDEAS_PACK_2
-        + IDEAS_PACK_3
-        + IDEAS_PACK_4
-        + IDEAS_PACK_5
-    )
-    return sorted(all_ideas, key=lambda x: (-x.roi_score, x.id))
-

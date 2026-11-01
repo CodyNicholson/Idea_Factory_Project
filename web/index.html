@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Idea Factory — 5-Hour Autonomous Venture & Product Engine</title>
+  <title>Idea Factory — Gemini 4 Argon Product Idea Engine</title>
   <style>
     :root {
       --bg: #0b0f19;
@@ -149,7 +149,7 @@
 <body>
   <header>
     <div>
-      <h1>Idea Factory — Autonomous 5-Hour Venture & Product Engine</h1>
+      <h1>Idea Factory — Gemini 4 Argon Product Idea Engine</h1>
       <div class="subtitle">Grounded in <code>Claude_Skills_Project</code> + <code>Business_Analyzer_Project</code> Actuarial Survival & Israelsen ROI Math</div>
     </div>
     <div class="controls">
@@ -157,8 +157,6 @@
         <input type="checkbox" id="autoFollowNewest" checked style="width:auto;" />
         Auto-Follow Newest Idea
       </label>
-      <button onclick="generateOne()">+ Synthesize New Idea Now</button>
-      <button class="emerald" onclick="startLoop()">▶ Start 5-Hour Agent Loop</button>
       <button class="secondary" onclick="refreshAll()">↻ Refresh</button>
     </div>
   </header>
@@ -186,7 +184,6 @@
     </section>
   </main>
 
-  <script src="ideas_data.js"></script>
   <script>
     let IDEAS = [];
     let AGENT_STATE = {};
@@ -198,47 +195,27 @@
       return m ? parseInt(m[1], 10) : 0;
     }
 
-    function loadScriptBundle() {
-      return new Promise((resolve) => {
-        const old = document.getElementById('liveBundleScript');
-        if (old) old.remove();
-        const s = document.createElement('script');
-        s.id = 'liveBundleScript';
-        s.src = 'ideas_data.js?t=' + Date.now();
-        s.onload = () => resolve(window.__IDEA_FACTORY_BUNDLE__ || null);
-        s.onerror = () => resolve(window.__IDEA_FACTORY_BUNDLE__ || null);
-        document.body.appendChild(s);
-      });
+    const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    // Idea text comes from a model that also reads third-party signals, so it is never trusted as HTML.
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, c => ESCAPES[c]);
     }
 
     async function fetchIdeasAndStatus() {
       const ts = Date.now();
-      let loadedFromApi = false;
-
-      for (const base of ['', 'http://127.0.0.1:8020']) {
-        if (window.location.protocol === 'file:' && base === '') continue;
-        try {
-          const [ideasRes, statusRes] = await Promise.all([
-            fetch(`${base}/api/ideas?t=${ts}`, { cache: 'no-store' }),
-            fetch(`${base}/api/status?t=${ts}`, { cache: 'no-store' }),
-          ]);
-          if (ideasRes.ok && statusRes.ok) {
-            const ideasData = await ideasRes.json();
-            const statusData = await statusRes.json();
-            IDEAS = ideasData.ideas || [];
-            AGENT_STATE = statusData || {};
-            loadedFromApi = true;
-            break;
-          }
-        } catch (_) {}
-      }
-
-      if (!loadedFromApi) {
-        const bundle = await loadScriptBundle();
-        if (bundle && Array.isArray(bundle.ideas)) {
-          IDEAS = bundle.ideas;
-          AGENT_STATE = bundle.state || {};
+      try {
+        const [ideasRes, statusRes] = await Promise.all([
+          fetch(`/api/ideas?t=${ts}`, { cache: 'no-store' }),
+          fetch(`/api/status?t=${ts}`, { cache: 'no-store' }),
+        ]);
+        if (ideasRes.ok && statusRes.ok) {
+          IDEAS = (await ideasRes.json()).ideas || [];
+          AGENT_STATE = (await statusRes.json()) || {};
+        } else {
+          document.getElementById('liveBanner').textContent = 'PostgreSQL is unavailable. Showing the last loaded data.';
         }
+      } catch (_) {
+        document.getElementById('liveBanner').textContent = 'The dashboard server is unreachable. Showing the last loaded data.';
       }
 
       const newest = [...IDEAS].sort((a, b) => parseIdeaNum(b.id) - parseIdeaNum(a.id))[0];
@@ -265,15 +242,15 @@
       const meanS5 = IDEAS.length ? (IDEAS.reduce((s, i) => s + i.survival_5yr * 100, 0) / IDEAS.length).toFixed(1) + '%' : '–';
       document.getElementById('statusStrip').innerHTML = `
         <div class="stat-card"><div class="stat-label">Total Product Ideas</div><div class="stat-val">${IDEAS.length}</div></div>
-        <div class="stat-card"><div class="stat-label">Newest Idea ID</div><div class="stat-val" style="color:var(--emerald)">${newest ? newest.id : '–'}</div></div>
+        <div class="stat-card"><div class="stat-label">Newest Idea ID</div><div class="stat-val" style="color:var(--emerald)">${esc(newest ? newest.id : '–')}</div></div>
         <div class="stat-card"><div class="stat-label">Mean Risk-Adjusted ROI</div><div class="stat-val">${meanRoi} / 100</div></div>
         <div class="stat-card"><div class="stat-label">Mean 5-Yr Survival S(60)</div><div class="stat-val">${meanS5}</div></div>
-        <div class="stat-card"><div class="stat-label">5-Hr Agent Status</div><div class="stat-val">${st.status || 'RUNNING'}</div></div>
-        <div class="stat-card"><div class="stat-label">Elapsed / 5-Hr Budget</div><div class="stat-val">${Math.round(st.elapsed_seconds || 0)}s / ${st.max_runtime_seconds || 18000}s</div></div>
+        <div class="stat-card"><div class="stat-label">Agent Status</div><div class="stat-val">${esc(st.status || 'IDLE')}</div></div>
+        <div class="stat-card"><div class="stat-label">${st.resume_at ? 'Resumes At' : 'Tokens This Run'}</div><div class="stat-val">${st.resume_at ? esc(new Date(st.resume_at).toLocaleString()) : ((st.input_tokens || 0) + (st.output_tokens || 0) + (st.thought_tokens || 0)).toLocaleString()}</div></div>
       `;
       if (newest) {
         document.getElementById('liveBanner').innerHTML = `
-          <span>🟢 <strong>Latest Idea Generated:</strong> <a href="#" onclick="selectIdea('${newest.id}'); return false;" style="color:#34d399; text-decoration:underline;">${newest.id} — ${newest.title}</a> (ROI ${newest.roi_score.toFixed(1)} | NAICS ${newest.naics_code})</span>
+          <span>🟢 <strong>Latest Idea Generated:</strong> <a href="#" onclick="selectIdea('${esc(newest.id)}'); return false;" style="color:#34d399; text-decoration:underline;">${esc(newest.id)} — ${esc(newest.title)}</a> (ROI ${newest.roi_score.toFixed(1)} | NAICS ${esc(newest.naics_code)})</span>
           <span style="color:var(--muted); font-size:0.78rem;">Auto-refreshing every 4s · Last synced: ${new Date().toLocaleTimeString()}</span>
         `;
       }
@@ -293,17 +270,17 @@
         return b.roi_score - a.roi_score || parseIdeaNum(b.id) - parseIdeaNum(a.id);
       });
       document.getElementById('ideaList').innerHTML = filtered.map(i => {
-        const isNew = parseIdeaNum(i.id) > 20;
+        const fromGemini = i.generation_source === 'GEMINI_4_ARGON_HIGH';
         return `
-        <div class="idea-card ${i.id === SELECTED_ID ? 'active' : ''}" onclick="selectIdea('${i.id}')">
+        <div class="idea-card ${i.id === SELECTED_ID ? 'active' : ''}" onclick="selectIdea('${esc(i.id)}')">
           <div>
-            ${isNew ? '<span class="badge" style="background:#065f46; color:#6ee7b7;">NEW</span>' : ''}
-            <span class="badge">${i.id}</span>
+            ${fromGemini ? '<span class="badge" style="background:#065f46; color:#6ee7b7;">GEMINI</span>' : '<span class="badge">LEGACY TEMPLATE</span>'}
+            <span class="badge">${esc(i.id)}</span>
             <span class="badge roi">ROI ${i.roi_score.toFixed(1)}</span>
-            <span class="badge">NAICS ${i.naics_code}</span>
+            <span class="badge">NAICS ${esc(i.naics_code)}</span>
           </div>
-          <div style="font-weight:700; margin-top:6px; color:#fff;">${i.title}</div>
-          <div style="font-size:0.82rem; color:var(--muted); margin-top:4px;">${i.tagline}</div>
+          <div style="font-weight:700; margin-top:6px; color:#fff;">${esc(i.title)}</div>
+          <div style="font-size:0.82rem; color:var(--muted); margin-top:4px;">${esc(i.tagline)}</div>
         </div>
       `;
       }).join('');
@@ -321,17 +298,17 @@
       document.getElementById('ideaDetail').innerHTML = `
         <div>
           <span class="badge roi">Risk-Adjusted ROI: ${i.roi_score.toFixed(1)} / 100</span>
-          <span class="badge">${i.category}</span>
-          <span class="badge">NAICS ${i.naics_code} (${i.industry_name})</span>
-          <span class="badge">${i.target_metro}</span>
+          <span class="badge">${esc(i.category)}</span>
+          <span class="badge">NAICS ${esc(i.naics_code)} (${esc(i.industry_name)})</span>
+          <span class="badge">${esc(i.target_metro)}</span>
         </div>
-        <h2 style="margin-top:10px; color:#fff;">${i.id}: ${i.title}</h2>
-        <p style="color:var(--accent); font-weight:600; margin-top:4px;">${i.tagline}</p>
-        <p style="margin-top:10px; color:#cbd5e1;">${i.summary}</p>
+        <h2 style="margin-top:10px; color:#fff;">${esc(i.id)}: ${esc(i.title)}</h2>
+        <p style="color:var(--accent); font-weight:600; margin-top:4px;">${esc(i.tagline)}</p>
+        <p style="margin-top:10px; color:#cbd5e1;">${esc(i.summary)}</p>
         <div style="margin-top:10px; font-size:0.82rem; color:var(--muted);">
-          <strong>Skills:</strong> ${(i.referenced_skills || []).join(', ')} &nbsp;|&nbsp;
-          <strong>Projects:</strong> ${(i.referenced_projects || []).join(', ')} &nbsp;|&nbsp;
-          <strong>Patterns:</strong> ${(i.pattern_ids || []).join(', ')}
+          <strong>Skills:</strong> ${esc((i.referenced_skills || []).join(', '))} &nbsp;|&nbsp;
+          <strong>Projects:</strong> ${esc((i.referenced_projects || []).join(', '))} &nbsp;|&nbsp;
+          <strong>Patterns:</strong> ${esc((i.pattern_ids || []).join(', '))}
         </div>
         <div class="metrics-grid">
           <div class="m-pill"><div class="k">5-Yr Survival S(60)</div><div class="v">${(i.survival_5yr * 100).toFixed(1)}%</div></div>
@@ -344,64 +321,38 @@
 
         <div class="sec-box">
           <div class="sec-title">1. Product & Problem-Solving</div>
-          <div class="q-item"><div class="q-label">• How acute is the problem?</div><div class="q-ans">${i.product_and_problem_solving.acuteness_of_problem}</div></div>
-          <div class="q-item"><div class="q-label">• Is the solution 10x better?</div><div class="q-ans">${i.product_and_problem_solving.ten_x_better_solution}</div></div>
-          <div class="q-item"><div class="q-label">• What are the usage and retention metrics?</div><div class="q-ans">${i.product_and_problem_solving.usage_and_retention_metrics}</div></div>
+          <div class="q-item"><div class="q-label">• How acute is the problem?</div><div class="q-ans">${esc(i.product_and_problem_solving.acuteness_of_problem)}</div></div>
+          <div class="q-item"><div class="q-label">• Is the solution 10x better?</div><div class="q-ans">${esc(i.product_and_problem_solving.ten_x_better_solution)}</div></div>
+          <div class="q-item"><div class="q-label">• What are the usage and retention metrics?</div><div class="q-ans">${esc(i.product_and_problem_solving.usage_and_retention_metrics)}</div></div>
         </div>
 
         <div class="sec-box">
           <div class="sec-title">2. Market & Competition</div>
-          <div class="q-item"><div class="q-label">• How big is the market and is it growing?</div><div class="q-ans">${i.market_and_competition.tam_and_growth_tailwinds}</div></div>
-          <div class="q-item"><div class="q-label">• Who is the competition and what is the "edge"?</div><div class="q-ans">${i.market_and_competition.competition_and_defensible_edge}</div></div>
-          <div class="q-item"><div class="q-label">• Why do customers switch?</div><div class="q-ans">${i.market_and_competition.why_customers_switch}</div></div>
+          <div class="q-item"><div class="q-label">• How big is the market and is it growing?</div><div class="q-ans">${esc(i.market_and_competition.tam_and_growth_tailwinds)}</div></div>
+          <div class="q-item"><div class="q-label">• Who is the competition and what is the "edge"?</div><div class="q-ans">${esc(i.market_and_competition.competition_and_defensible_edge)}</div></div>
+          <div class="q-item"><div class="q-label">• Why do customers switch?</div><div class="q-ans">${esc(i.market_and_competition.why_customers_switch)}</div></div>
         </div>
 
         <div class="sec-box">
           <div class="sec-title">3. Business Model & Traction</div>
-          <div class="q-item"><div class="q-label">• What does customer acquisition look like?</div><div class="q-ans">${i.business_model_and_traction.cac_ltv_and_payback}</div></div>
-          <div class="q-item"><div class="q-label">• What is the nature of the revenue?</div><div class="q-ans">${i.business_model_and_traction.nature_of_revenue}</div></div>
-          <div class="q-item"><div class="q-label">• Who are the actual paying customers?</div><div class="q-ans">${i.business_model_and_traction.actual_paying_customers}</div></div>
+          <div class="q-item"><div class="q-label">• What does customer acquisition look like?</div><div class="q-ans">${esc(i.business_model_and_traction.cac_ltv_and_payback)}</div></div>
+          <div class="q-item"><div class="q-label">• What is the nature of the revenue?</div><div class="q-ans">${esc(i.business_model_and_traction.nature_of_revenue)}</div></div>
+          <div class="q-item"><div class="q-label">• Who are the actual paying customers?</div><div class="q-ans">${esc(i.business_model_and_traction.actual_paying_customers)}</div></div>
         </div>
 
         <div class="sec-box">
           <div class="sec-title">4. Financials & Runway</div>
-          <div class="q-item"><div class="q-label">• What is the burn rate and runway?</div><div class="q-ans">${i.financials_and_runway.burn_rate_and_runway}</div></div>
-          <div class="q-item"><div class="q-label">• Are unit economics improving?</div><div class="q-ans">${i.financials_and_runway.unit_economics_scaling}</div></div>
-          <div class="q-item"><div class="q-label">• What are the fundraising and cap table realities?</div><div class="q-ans">${i.financials_and_runway.fundraising_and_cap_table}</div></div>
+          <div class="q-item"><div class="q-label">• What is the burn rate and runway?</div><div class="q-ans">${esc(i.financials_and_runway.burn_rate_and_runway)}</div></div>
+          <div class="q-item"><div class="q-label">• Are unit economics improving?</div><div class="q-ans">${esc(i.financials_and_runway.unit_economics_scaling)}</div></div>
+          <div class="q-item"><div class="q-label">• What are the fundraising and cap table realities?</div><div class="q-ans">${esc(i.financials_and_runway.fundraising_and_cap_table)}</div></div>
         </div>
 
         <div class="sec-box">
           <div class="sec-title">5. Team & Execution</div>
-          <div class="q-item"><div class="q-label">• Do they have founder-product fit?</div><div class="q-ans">${i.team_and_execution.founder_product_fit}</div></div>
-          <div class="q-item"><div class="q-label">• How do they handle pressure and pivot?</div><div class="q-ans">${i.team_and_execution.pressure_and_pivot_playbook}</div></div>
+          <div class="q-item"><div class="q-label">• Do they have founder-product fit?</div><div class="q-ans">${esc(i.team_and_execution.founder_product_fit)}</div></div>
+          <div class="q-item"><div class="q-label">• How do they handle pressure and pivot?</div><div class="q-ans">${esc(i.team_and_execution.pressure_and_pivot_playbook)}</div></div>
         </div>
       `;
-    }
-
-    async function generateOne() {
-      for (const base of ['', 'http://127.0.0.1:8020']) {
-        if (window.location.protocol === 'file:' && base === '') continue;
-        try {
-          const res = await fetch(`${base}/api/generate-one`, { method: 'POST' });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.idea) SELECTED_ID = data.idea.id;
-            break;
-          }
-        } catch (_) {}
-      }
-      await refreshAll();
-    }
-
-    async function startLoop() {
-      for (const base of ['', 'http://127.0.0.1:8020']) {
-        if (window.location.protocol === 'file:' && base === '') continue;
-        try {
-          const res = await fetch(`${base}/api/start-loop`, { method: 'POST' });
-          if (res.ok) break;
-        } catch (_) {}
-      }
-      await refreshAll();
     }
 
     async function refreshAll() {

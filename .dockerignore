@@ -1,0 +1,5 @@
+*
+!idea_factory/
+!migrations/
+!web/
+**/__pycache__
