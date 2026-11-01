@@ -1,65 +1,88 @@
-# Idea Factory — Autonomous 5-Hour Startup & Product Intelligence Engine
+# Idea Factory
 
-An autonomous product-ideation, actuarial-scoring, and 14-point investor due-diligence engine grounded in:
-* **[`Claude_Skills_Project`](file:///Users/codynicholson/workspace/Claude_Skills_Project/README.md)** (`software-intake-planner`, `visual-lab`, `design-game`, `claude-skill-factory`, `enterprise-fullstack-plugin`)
-* **[`Business_Analyzer_Project`](file:///Users/codynicholson/workspace/Business_Analyzer_Project/README.md)** (Cox PH survival curves, LightGBM quantile yields, Israelsen Risk-Adjusted ROI math, SHAP causal attributions across 23 metros and 21 NAICS industries)
-* **Sibling Workspace Assets** (`Kafka_Visual_Lab_Project`, `Rixus_RE_Project`, `Accounting_Backend_API_Project`, `Resume_Creator_Project`, `Airship_Blender_Assets_Project`, `Video_Game_Music_Generator_Project`, `Cameo_HoldEm_Project`)
+Generates product ideas continuously with **Gemini 4 Argon at High effort**, scores them, and stores
+everything in PostgreSQL running in Docker.
 
----
+## Quick start
 
-## Key Outputs & Documentation
-
-1. **[`docs/STARTUP_PATTERNS_AND_PLAYBOOK.md`](file:///Users/codynicholson/workspace/Idea_Factory_Project/docs/STARTUP_PATTERNS_AND_PLAYBOOK.md)** — Deep analysis answering:
-   * *What are the most successful startup companies doing right now (2025–2026)?*
-   * *What 8 repeatable patterns (`PAT-01`–`PAT-08`) can we follow to generate our own profitable products?*
-   * *How does our Founder-Product Fit Matrix map onto high-survival NAICS verticals?*
-2. **[`IDEAS_CATALOG.md`](file:///Users/codynicholson/workspace/Idea_Factory_Project/IDEAS_CATALOG.md)** — Master Markdown catalog ranked by **Israelsen Risk-Adjusted ROI Score (0–100)**, containing executive summaries, quantitative unit economics ($S(12)$, $S(60)$, 3-Yr IRR, LTV:CAC, Payback, Gross Margin, Founder Fit), and exhaustive answers to all **5 Core Sections & 14 Diligence Questions** for every product idea.
-3. **[`docker-compose.yml`](file:///Users/codynicholson/workspace/Idea_Factory_Project/docker-compose.yml) & [`migrations/001_initial_idea_factory_schema.sql`](file:///Users/codynicholson/workspace/Idea_Factory_Project/migrations/001_initial_idea_factory_schema.sql)** — Production PostgreSQL 16 Docker container (`idea-factory-postgres` on `127.0.0.1:5435`) storing all product ideas (`product_ideas`), actuarial & unit-economics metrics (`idea_metrics`), normalized 14 investor diligence answers (`idea_diligence_questions`), and 5-hour agent telemetry (`agent_runs`), synced automatically with [`data/ideas.json`](file:///Users/codynicholson/workspace/Idea_Factory_Project/data/ideas.json) & `data/idea_factory.db`.
-
----
-
-## Quick Start (Docker PostgreSQL + Zero External Python Dependencies)
+1. Run `./run_agent.sh --db-only`. This creates `.env` with a random database password and starts PostgreSQL. It spends no tokens.
+2. Add a paid-tier key to `.env` as `GEMINI_API_KEY=...`. Gemini 4 Argon is not on the free tier.
+3. **Set a spend limit first** (see [Cost](#cost)), because the agent runs until the allowance runs out.
+4. Run `./run_agent.sh` to build and start the agent.
 
 ```bash
-# 0. Spin up the Docker PostgreSQL 16 database (port 5435) and apply SQL migrations
-docker compose up -d --wait
-python3 -m idea_factory migrate
-python3 -m idea_factory db-status
-
-# 1. Seed & generate the initial product ideas catalog
-python3 -m idea_factory seed
-
-# 2. Synthesize and append 1 new product idea immediately
-python3 -m idea_factory generate-one
-
-# 3. Run the 5-Hour Continuous Autonomous Loop Agent (runs for 5 hours or until AI credits are exhausted)
-./run_5hr_agent.sh
-# Or with custom parameters:
-python3 -m idea_factory run --hours 5.0 --interval 45
-
-# 4. Deterministically verify all ideas against the 14-question schema & actuarial invariants
-python3 -m idea_factory verify
-
-# 5. Launch the interactive Web Dashboard & API Server (http://127.0.0.1:8020)
-python3 -m idea_factory serve --port 8020
-
-# 6. Run the automated unit & integration test suite
-python3 -m unittest discover -s tests -v
+docker compose logs -f agent         # follow the agent
+docker compose --profile agent stop agent   # stop generating
+python3 -m idea_factory serve        # read-only dashboard on http://127.0.0.1:8020
 ```
 
----
+## Model
 
-## How the 5-Hour Autonomous Agent Loop Works
+Only `gemini-4-argon` with `thinking_level: high` is used. There is no fallback model and no template engine.
 
-`idea_factory/agent.py` runs in a continuous loop bounded by `AGENT_MAX_HOURS=5.0` (18,000 seconds) and automatically detects AI credit/quota exhaustion (`HTTP 402`, `HTTP 429` rate-limit/quota errors, `insufficient_quota`, or `claude -p` 5-hour session limits):
+- The model and effort are constants in `idea_factory/config.py`, so no environment setting can change them.
+- The agent stops if a response reports a different model.
+- Database `CHECK` constraints on `gemini_calls` and `agent_runs` refuse any other model or effort.
 
-1. **Provider Priority (`idea_factory/generator.py`):**
-   * `anthropic` (`ANTHROPIC_API_KEY`) -> `claude_cli` (`claude -p`) -> `gemini` (`GEMINI_API_KEY`) -> `openai` (`OPENAI_API_KEY`) -> `openrouter` (`OPENROUTER_API_KEY`) -> `synthesis` (Built-in Actuarial & Combinatorial Synthesis Engine + live HN Algolia signals).
-2. ** Quantitative Scoring (`idea_factory/scoring.py`):**
-   * Fits a Weibull survival curve through 1-year ($S_{12}$) and 5-year ($S_{60}$) survival probabilities.
-   * Computes Israelsen-corrected Risk-Adjusted ROI:
-     $$\text{raw} = \frac{S_{60} \cdot (\text{EBITDA}/\text{CapEx}) - (1 - S_{60}) \cdot \text{LGD}}{\sigma_{\text{sector}}}$$
-   * Maps to a 0–100 score and solves for the 3-year survival-weighted IRR, LTV, LTV:CAC ratio, and CAC payback months.
-3. **Deterministic Validation (`idea_factory/models.py`):**
-   * Every generated idea is checked by `validate_idea()` to ensure all 14 diligence questions across the 5 required sections are thoroughly answered before atomic persistence to SQLite, `data/ideas.json`, and `IDEAS_CATALOG.md`.
+## When the tokens run out
 
+The Gemini API has no single token window, so the agent reads each error and waits accordingly:
+
+| Signal | Meaning | What the agent does |
+| :--- | :--- | :--- |
+| 429, per-minute or rate limit | Short-term limit reached | Waits for Google's retry hint, otherwise backs off up to 1 hour |
+| 429, per-day or `quota_exceeded` | Daily quota used up | Waits until midnight Pacific time, when it resets |
+| 402, or a credit or spend-cap message | Prepay credits or spend cap used up | Retries hourly, and resumes after the 1st of the month or once credits are added |
+| 5xx, 408 or a network error | Temporary failure | Backs off up to 1 hour |
+| 401, 403, 404, other 400, or a 429 with `limit: 0` | Bad key, wrong tier or bad request | Exits with an error, and Docker restarts the container |
+
+The wait reason and resume time are saved in `agent_runs`. Because the next idea's id and context come from
+the database, the agent resumes correctly after a restart or a reboot.
+
+## Data
+
+All data lives in the Docker volume `idea_factory_pgdata`, mounted at `/var/lib/postgresql/data`. It is
+declared `external`, so stopping or removing the container, `docker compose down` and even
+`docker compose down -v` all leave it in place. Only `docker volume rm idea_factory_pgdata` deletes it.
+
+PostgreSQL listens on `127.0.0.1:5435` only.
+
+| Table | Contents |
+| :--- | :--- |
+| `product_ideas` | Every idea, including the full JSON document |
+| `idea_metrics` | Actuarial and unit-economics metrics |
+| `idea_diligence_questions` | The 14 diligence answers, one row each |
+| `gemini_calls` | Every billed call: tokens, outcome, raw answer (including rejected answers) |
+| `agent_runs` | Agent status, token totals, wait reason and resume time |
+
+`generation_source` separates the sources: `GEMINI_4_ARGON_HIGH` for new ideas, and
+`WORKSPACE_SYNTHESIS` or `AUTONOMOUS_LOOP_SYNTHESIS` for the 879 ideas imported from the old
+template engine.
+
+## Commands
+
+```bash
+python3 -m idea_factory status      # latest agent run
+python3 -m idea_factory db-status   # connection, migrations, row counts, portfolio metrics
+python3 -m idea_factory verify      # validate all stored ideas
+python3 -m idea_factory catalog     # export all ideas to IDEAS_CATALOG.md (git-ignored)
+python3 -m idea_factory rescore     # recalculate scores for all stored ideas
+python3 -m idea_factory run --max-iterations 1   # store one idea, then exit
+python3 -m unittest discover -s tests            # tests (no tokens spent; integration tests need PostgreSQL)
+```
+
+Each idea's scores come from `idea_factory/scoring.py`, which blends the model's estimates toward industry
+benchmarks. `validate_idea` in `idea_factory/models.py` must pass before an idea is stored.
+
+## Cost
+
+Gemini 4 Argon costs $2 per 1M input tokens and $10 per 1M output and thinking tokens until November 30, 2026,
+then $4 and $20. The agent has no budget of its own: it stops only when Google stops it.
+
+Set a limit before starting, in one of these ways:
+
+- A **project spend cap** on the AI Studio Spend page. This is the safest option because it affects only this project.
+- **Prepay credits** with auto-reload off.
+
+Avoid relying on the account-wide tier cap, or on depleting prepay credits on a shared billing account. Either
+one pauses every project on that billing account, not just this one.

@@ -1,267 +1,22 @@
-"""Atomic persistence layer: SQLite (`data/idea_factory.db`), JSON (`data/ideas.json`), and Markdown (`IDEAS_CATALOG.md`)."""
+"""Idea persistence. PostgreSQL is the only store; the Markdown catalog is an on-demand export."""
 from __future__ import annotations
 
-import json
-import os
-import sqlite3
-import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import config
-from .models import ProductIdea, validate_idea
-from .postgres import (
-    get_postgres_status,
-    load_ideas_postgres,
-    run_migrations,
-    upsert_agent_state_postgres,
-    upsert_ideas_postgres,
-)
+from .models import ProductIdea
+from .postgres import latest_agent_state, load_ideas_postgres, upsert_ideas_postgres
 
 
-def _warn_postgres(operation: str, exc: Exception) -> None:
-    """Report (never silently swallow) a failed PostgreSQL write; local JSON/SQLite copies remain intact."""
-    print(
-        f"WARNING [{operation}]: PostgreSQL write failed ({type(exc).__name__}: {exc}). "
-        "Idea saved to local JSON/SQLite; run `python3 -m idea_factory migrate` to backfill Postgres.",
-        file=sys.stderr,
-    )
+def load_ideas() -> list[ProductIdea]:
+    """Load all ideas from PostgreSQL, ordered by risk-adjusted ROI score descending."""
+    return load_ideas_postgres()
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Atomically write text to `path` via a PID-scoped temp file and `os.replace`."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    tmp_path.write_text(content, encoding="utf-8")
-    os.replace(tmp_path, path)
-
-
-def init_db(db_path: Path = config.SQLITE_DB_PATH) -> None:
-    """Ensure SQLite tables exist for ideas and 5-hour agent loop telemetry."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS product_ideas (
-                id TEXT PRIMARY KEY,
-                slug TEXT UNIQUE NOT NULL,
-                title TEXT NOT NULL,
-                category TEXT NOT NULL,
-                naics_code TEXT NOT NULL,
-                target_metro TEXT NOT NULL,
-                roi_score REAL NOT NULL,
-                survival_5yr REAL NOT NULL,
-                projected_3yr_irr_pct REAL NOT NULL,
-                ltv_cac_ratio REAL NOT NULL,
-                founder_fit_score REAL NOT NULL,
-                generation_source TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                payload_json TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS agent_runs (
-                run_id TEXT PRIMARY KEY,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                elapsed_seconds REAL NOT NULL,
-                max_runtime_seconds INTEGER NOT NULL,
-                ideas_generated INTEGER NOT NULL,
-                api_calls INTEGER NOT NULL,
-                estimated_cost_usd REAL NOT NULL,
-                stop_reason TEXT
-            )
-            """
-        )
-        conn.commit()
-
-
-def load_ideas(json_path: Path = config.IDEAS_JSON_PATH) -> list[ProductIdea]:
-    """Load all persisted product ideas ordered by Risk-Adjusted ROI score descending (PostgreSQL primary, JSON/SQLite fallback)."""
-    if json_path == config.IDEAS_JSON_PATH:
-        try:
-            pg_ideas = load_ideas_postgres()
-            if pg_ideas:
-                return pg_ideas
-        except Exception:
-            pass
-    if json_path.exists():
-        try:
-            text = json_path.read_text(encoding="utf-8")
-            if text.strip():
-                raw = json.loads(text)
-                return [ProductIdea.from_dict(item) for item in raw]
-        except Exception:
-            pass
-    if json_path == config.IDEAS_JSON_PATH and config.SQLITE_DB_PATH.exists():
-        with sqlite3.connect(config.SQLITE_DB_PATH, timeout=30.0) as conn:
-            rows = conn.execute(
-                "SELECT payload_json FROM product_ideas ORDER BY roi_score DESC, id ASC"
-            ).fetchall()
-        return [ProductIdea.from_dict(json.loads(r[0])) for r in rows]
-    return []
-
-
-def save_idea(
-    idea: ProductIdea,
-    *,
-    db_path: Path = config.SQLITE_DB_PATH,
-    json_path: Path = config.IDEAS_JSON_PATH,
-    catalog_path: Path = config.CATALOG_MD_PATH,
-) -> bool:
-    """Validate and atomically persist a new ProductIdea across SQLite, JSON, and IDEAS_CATALOG.md.
-
-    Returns True if inserted or updated, False if validation failed.
-    """
-    if not idea.created_at:
-        idea.created_at = datetime.now(timezone.utc).isoformat()
-    errors = validate_idea(idea)
-    if errors:
-        raise ValueError("Invalid ProductIdea: " + "; ".join(errors))
-
-    init_db(db_path)
-    payload_str = json.dumps(idea.to_dict(), ensure_ascii=False)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO product_ideas (
-                id, slug, title, category, naics_code, target_metro,
-                roi_score, survival_5yr, projected_3yr_irr_pct, ltv_cac_ratio,
-                founder_fit_score, generation_source, created_at, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                slug=excluded.slug,
-                title=excluded.title,
-                category=excluded.category,
-                naics_code=excluded.naics_code,
-                target_metro=excluded.target_metro,
-                roi_score=excluded.roi_score,
-                survival_5yr=excluded.survival_5yr,
-                projected_3yr_irr_pct=excluded.projected_3yr_irr_pct,
-                ltv_cac_ratio=excluded.ltv_cac_ratio,
-                founder_fit_score=excluded.founder_fit_score,
-                generation_source=excluded.generation_source,
-                payload_json=excluded.payload_json
-            """,
-            (
-                idea.id,
-                idea.slug,
-                idea.title,
-                idea.category,
-                idea.naics_code,
-                idea.target_metro,
-                idea.roi_score,
-                idea.survival_5yr,
-                idea.projected_3yr_irr_pct,
-                idea.ltv_cac_ratio,
-                idea.founder_fit_score,
-                idea.generation_source,
-                idea.created_at,
-                payload_str,
-            ),
-        )
-        conn.commit()
-        rows = conn.execute(
-            "SELECT payload_json FROM product_ideas ORDER BY roi_score DESC, id ASC"
-        ).fetchall()
-
-    all_ideas = [ProductIdea.from_dict(json.loads(r[0])) for r in rows]
-    if db_path == config.SQLITE_DB_PATH:
-        try:
-            upsert_ideas_postgres([idea])
-        except Exception as exc:
-            _warn_postgres("save_idea", exc)
-    _atomic_write_text(
-        json_path,
-        json.dumps([i.to_dict() for i in all_ideas], indent=2, ensure_ascii=False),
-    )
-    render_catalog_markdown(all_ideas, catalog_path=catalog_path)
-    if json_path == config.IDEAS_JSON_PATH:
-        write_web_bundle(ideas=all_ideas)
-    return True
-
-
-def save_ideas_batch(
-    ideas: list[ProductIdea],
-    *,
-    db_path: Path = config.SQLITE_DB_PATH,
-    json_path: Path = config.IDEAS_JSON_PATH,
-    catalog_path: Path = config.CATALOG_MD_PATH,
-) -> int:
-    """Validate and save a batch of ProductIdeas efficiently."""
-    init_db(db_path)
-    now = datetime.now(timezone.utc).isoformat()
-    for idea in ideas:
-        if not idea.created_at:
-            idea.created_at = now
-        errors = validate_idea(idea)
-        if errors:
-            raise ValueError("; ".join(errors))
-
-    with sqlite3.connect(db_path) as conn:
-        for idea in ideas:
-            conn.execute(
-                """
-                INSERT INTO product_ideas (
-                    id, slug, title, category, naics_code, target_metro,
-                    roi_score, survival_5yr, projected_3yr_irr_pct, ltv_cac_ratio,
-                    founder_fit_score, generation_source, created_at, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    slug=excluded.slug,
-                    title=excluded.title,
-                    category=excluded.category,
-                    naics_code=excluded.naics_code,
-                    target_metro=excluded.target_metro,
-                    roi_score=excluded.roi_score,
-                    survival_5yr=excluded.survival_5yr,
-                    projected_3yr_irr_pct=excluded.projected_3yr_irr_pct,
-                    ltv_cac_ratio=excluded.ltv_cac_ratio,
-                    founder_fit_score=excluded.founder_fit_score,
-                    generation_source=excluded.generation_source,
-                    payload_json=excluded.payload_json
-                """,
-                (
-                    idea.id,
-                    idea.slug,
-                    idea.title,
-                    idea.category,
-                    idea.naics_code,
-                    idea.target_metro,
-                    idea.roi_score,
-                    idea.survival_5yr,
-                    idea.projected_3yr_irr_pct,
-                    idea.ltv_cac_ratio,
-                    idea.founder_fit_score,
-                    idea.generation_source,
-                    idea.created_at,
-                    json.dumps(idea.to_dict(), ensure_ascii=False),
-                ),
-            )
-        conn.commit()
-        rows = conn.execute(
-            "SELECT payload_json FROM product_ideas ORDER BY roi_score DESC, id ASC"
-        ).fetchall()
-
-    all_ideas = [ProductIdea.from_dict(json.loads(r[0])) for r in rows]
-    if db_path == config.SQLITE_DB_PATH:
-        try:
-            upsert_ideas_postgres(ideas)
-        except Exception as exc:
-            _warn_postgres("save_ideas_batch", exc)
-    _atomic_write_text(
-        json_path,
-        json.dumps([i.to_dict() for i in all_ideas], indent=2, ensure_ascii=False),
-    )
-    render_catalog_markdown(all_ideas, catalog_path=catalog_path)
-    if json_path == config.IDEAS_JSON_PATH:
-        write_web_bundle(ideas=all_ideas)
-    return len(all_ideas)
+def load_agent_state() -> dict[str, Any]:
+    """Return the telemetry of the most recent agent run."""
+    return latest_agent_state() or {"status": "IDLE", "model": config.GEMINI_MODEL, "iterations": 0}
 
 
 def render_catalog_markdown(
@@ -269,7 +24,7 @@ def render_catalog_markdown(
     *,
     catalog_path: Path = config.CATALOG_MD_PATH,
 ) -> None:
-    """Write the complete `IDEAS_CATALOG.md` with leaderboard summary and 14-point diligence per idea."""
+    """Write `IDEAS_CATALOG.md`: a leaderboard summary and the 14-point diligence for each idea."""
     avg_roi = sum(i.roi_score for i in ideas) / len(ideas) if ideas else 0.0
     avg_s5 = sum(i.survival_5yr for i in ideas) / len(ideas) * 100 if ideas else 0.0
     avg_ltv_cac = sum(i.ltv_cac_ratio for i in ideas) / len(ideas) if ideas else 0.0
@@ -284,8 +39,7 @@ def render_catalog_markdown(
 
     doc = f"""# Idea Factory — Master Product Ideas Catalog & 14-Point Investor Diligence
 
-> **Autonomous 5-Hour Idea Factory Engine** · Grounded in [`Claude_Skills_Project`](file:///Users/codynicholson/workspace/Claude_Skills_Project/README.md) & [`Business_Analyzer_Project`](file:///Users/codynicholson/workspace/Business_Analyzer_Project/README.md)
-> See also: [What Successful Startups Are Doing Right Now & 8 Repeatable Patterns (`docs/STARTUP_PATTERNS_AND_PLAYBOOK.md`)](file:///Users/codynicholson/workspace/Idea_Factory_Project/docs/STARTUP_PATTERNS_AND_PLAYBOOK.md)
+> Exported from PostgreSQL by `python3 -m idea_factory catalog`.
 
 ## Portfolio Summary & Actuarial Leaderboard
 
@@ -302,90 +56,13 @@ def render_catalog_markdown(
 
 {sections}
 """
-    _atomic_write_text(catalog_path, doc)
-
-
-def write_web_bundle(
-    ideas: list[ProductIdea] | None = None,
-    state: dict[str, Any] | None = None,
-) -> None:
-    """Write `web/ideas_data.js` so `web/index.html` live-updates even when opened via `file://` or static server."""
-    if ideas is None:
-        ideas = load_ideas()
-    if state is None:
-        state = load_agent_state()
-    state = dict(state)
-    state["ideas_count"] = len(ideas)
-    bundle = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "state": state,
-        "ideas": [i.to_dict() for i in ideas],
-    }
-    js_path = config.WEB_DIR / "ideas_data.js"
-    _atomic_write_text(
-        js_path,
-        "window.__IDEA_FACTORY_BUNDLE__ = " + json.dumps(bundle, ensure_ascii=False) + ";\n",
-    )
-
-
-def save_agent_state(state: dict[str, Any], path: Path = config.AGENT_STATE_PATH) -> None:
-    """Persist the live 5-hour loop agent telemetry without clobbering an active 5-hr daemon from a one-shot run."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    merged = dict(state)
-    if path.exists():
-        try:
-            prev = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                prev.get("status") == "RUNNING"
-                and prev.get("run_id") != state.get("run_id")
-                and state.get("elapsed_seconds", 0) < 30
-            ):
-                merged["run_id"] = prev["run_id"]
-                merged["status"] = "RUNNING"
-                merged["started_at"] = prev["started_at"]
-                merged["elapsed_seconds"] = prev.get("elapsed_seconds", 0.0)
-                merged["remaining_seconds"] = prev.get("remaining_seconds", 18000.0)
-                merged["iterations"] = max(prev.get("iterations", 0), state.get("iterations", 0))
-                merged["stop_reason"] = ""
-        except Exception:
-            pass
-    _atomic_write_text(path, json.dumps(merged, indent=2, ensure_ascii=False))
-    if path == config.AGENT_STATE_PATH:
-        try:
-            upsert_agent_state_postgres(merged)
-        except Exception as exc:
-            _warn_postgres("save_agent_state", exc)
-        write_web_bundle(state=merged)
-
-
-def sync_all_to_postgres() -> dict[str, Any]:
-    """Run PostgreSQL schema migrations and sync all ProductIdeas, metrics, 14 questions, and agent state to Docker Postgres."""
-    applied_migrations = run_migrations()
-    local_ideas: list[ProductIdea] = []
-    if config.IDEAS_JSON_PATH.exists():
-        raw = json.loads(config.IDEAS_JSON_PATH.read_text(encoding="utf-8"))
-        local_ideas = [ProductIdea.from_dict(item) for item in raw]
-    elif config.SQLITE_DB_PATH.exists():
-        with sqlite3.connect(config.SQLITE_DB_PATH, timeout=30.0) as conn:
-            rows = conn.execute(
-                "SELECT payload_json FROM product_ideas ORDER BY roi_score DESC, id ASC"
-            ).fetchall()
-        local_ideas = [ProductIdea.from_dict(json.loads(r[0])) for r in rows]
-
-    upserted = upsert_ideas_postgres(local_ideas)
-    state = load_agent_state()
-    state["ideas_count"] = len(local_ideas)
-    upsert_agent_state_postgres(state)
-    status = get_postgres_status()
-    status["upserted_ideas"] = upserted
-    status["migrations_just_verified"] = applied_migrations
-    return status
+    catalog_path.write_text(doc, encoding="utf-8")
 
 
 def rescore_idea(idea: ProductIdea) -> ProductIdea:
     """Recalibrate an existing ProductIdea with benchmark-calibrated scoring v2."""
+    from .idea_builder import unit_economics_narratives
     from .scoring import compute_idea_metrics
-    from .seed_ideas import unit_economics_narratives
     from .workspace_intel import BUSINESS_ANALYZER_INDUSTRIES
 
     bench = BUSINESS_ANALYZER_INDUSTRIES.get(idea.naics_code)
@@ -458,27 +135,7 @@ def rescore_idea(idea: ProductIdea) -> ProductIdea:
 
 
 def rescore_all_ideas() -> list[ProductIdea]:
-    """Rescore all persisted ideas in data/ideas.json to scoring v2 and save across JSON, SQLite, catalog, and web bundle."""
-    raw_ideas = load_ideas()
-    rescored = [rescore_idea(idea) for idea in raw_ideas]
-    save_ideas_batch(rescored)
+    """Rescore every idea in PostgreSQL with scoring v2 and save the results."""
+    rescored = [rescore_idea(idea) for idea in load_ideas()]
+    upsert_ideas_postgres(rescored)
     return rescored
-
-
-def load_agent_state(path: Path = config.AGENT_STATE_PATH) -> dict[str, Any]:
-    if path.exists():
-        try:
-            text = path.read_text(encoding="utf-8")
-            if text.strip():
-                return json.loads(text)
-        except Exception:
-            pass
-    return {
-        "status": "IDLE",
-        "elapsed_seconds": 0.0,
-        "max_runtime_seconds": config.AGENT_MAX_RUNTIME_SECONDS,
-        "ideas_count": len(load_ideas()),
-        "iterations": 0,
-        "provider": "synthesis",
-    }
-

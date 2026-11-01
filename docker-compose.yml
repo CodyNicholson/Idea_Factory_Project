@@ -5,20 +5,38 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-idea_factory}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-idea_factory_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-idea_factory}
     ports:
-      - "${POSTGRES_PORT:-5435}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5435}:5432"
     volumes:
       - idea_factory_pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-idea_factory} -d ${POSTGRES_DB:-idea_factory}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  # Started only with `--profile agent` (see run_agent.sh), because it spends Gemini tokens.
+  agent:
+    build: .
+    image: idea-factory-agent
+    container_name: idea-factory-agent
+    profiles: ["agent"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+
+# External, so compose never creates or deletes it. The data survives `docker compose down`,
+# `docker compose down -v` and removing the containers. run_agent.sh creates it on first use.
 volumes:
   idea_factory_pgdata:
     name: idea_factory_pgdata
-
+    external: true
