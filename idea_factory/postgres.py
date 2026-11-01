@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import socket
 import struct
@@ -14,11 +15,28 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from .gemini import GeminiCall
 from .models import ProductIdea
+
+# Arbitrary fixed key for the advisory lock that keeps a single agent running per database.
+AGENT_LOCK_KEY = 7246310955
 
 
 class PostgresError(RuntimeError):
     """Raised when PostgreSQL returns an ErrorResponse ('E') or connection error."""
+
+    def __init__(self, message: str, sqlstate: str | None = None) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def is_transient_db_error(exc: BaseException) -> bool:
+    """True for connection-level failures worth retrying, False when the statement itself was rejected."""
+    if isinstance(exc, OSError):
+        return True
+    if isinstance(exc, PostgresError):
+        return exc.sqlstate is None or exc.sqlstate[:2] in ("08", "53", "57")
+    return False
 
 
 def pg_literal(val: Any) -> str:
@@ -27,6 +45,8 @@ def pg_literal(val: Any) -> str:
         return "NULL"
     if isinstance(val, bool):
         return "TRUE" if val else "FALSE"
+    if isinstance(val, float) and not math.isfinite(val):
+        return "NULL"
     if isinstance(val, (int, float)):
         return str(val)
     if isinstance(val, (list, tuple)):
@@ -36,7 +56,8 @@ def pg_literal(val: Any) -> str:
         return f"ARRAY[{items}]::text[]"
     if isinstance(val, dict):
         return f"{pg_literal(json.dumps(val, ensure_ascii=False))}::jsonb"
-    s = str(val).replace("'", "''")
+    # PostgreSQL text cannot hold NUL, and NUL would end a simple-query message early.
+    s = str(val).replace("\x00", "").replace("'", "''")
     if "\\" in s:
         s = s.replace("\\", "\\\\")
         return f"E'{s}'"
@@ -48,18 +69,18 @@ class PostgresWireClient:
 
     def __init__(
         self,
-        host: str = config.POSTGRES_HOST,
-        port: int = config.POSTGRES_PORT,
-        user: str = config.POSTGRES_USER,
-        password: str = config.POSTGRES_PASSWORD,
-        database: str = config.POSTGRES_DB,
+        host: str | None = None,
+        port: int | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        database: str | None = None,
         timeout: float = 10.0,
     ) -> None:
-        self.host = host
-        self.port = port
-        self.user = user
-        self.password = password
-        self.database = database
+        self.host = host or config.POSTGRES_HOST
+        self.port = port or config.POSTGRES_PORT
+        self.user = user or config.POSTGRES_USER
+        self.password = config.POSTGRES_PASSWORD if password is None else password
+        self.database = database or config.POSTGRES_DB
         self.timeout = timeout
         self._sock: socket.socket | None = None
 
@@ -99,7 +120,7 @@ class PostgresWireClient:
                 else:
                     raise PostgresError(f"Unsupported PostgreSQL auth code: {auth_code}")
             elif msg_type == b"E":
-                raise PostgresError(self._parse_error(body))
+                raise self._error_from(body)
             elif msg_type == b"Z":
                 break
 
@@ -112,7 +133,7 @@ class PostgresWireClient:
 
         msg_type, body = self._read_msg()
         if msg_type == b"E":
-            raise PostgresError(self._parse_error(body))
+            raise self._error_from(body)
         auth_code = struct.unpack("!I", body[:4])[0]
         if auth_code != 11:
             raise PostgresError(f"Expected SASLContinue (11), got {auth_code}")
@@ -134,7 +155,7 @@ class PostgresWireClient:
 
         msg_type, body = self._read_msg()
         if msg_type == b"E":
-            raise PostgresError(self._parse_error(body))
+            raise self._error_from(body)
 
     def execute(self, sql: str) -> list[dict[str, Any]]:
         """Execute a SQL statement or multi-statement script and return any result rows."""
@@ -144,7 +165,7 @@ class PostgresWireClient:
         self._send_msg(b"Q", payload)
         columns: list[str] = []
         rows: list[dict[str, Any]] = []
-        errors: list[str] = []
+        first_error: PostgresError | None = None
 
         while True:
             msg_type, body = self._read_msg()
@@ -153,11 +174,11 @@ class PostgresWireClient:
             elif msg_type == b"D":
                 rows.append(self._parse_data_row(body, columns))
             elif msg_type == b"E":
-                errors.append(self._parse_error(body))
+                first_error = first_error or self._error_from(body)
             elif msg_type == b"Z":
                 break
-        if errors:
-            raise PostgresError("; ".join(errors))
+        if first_error:
+            raise first_error
         return rows
 
     def close(self) -> None:
@@ -194,10 +215,11 @@ class PostgresWireClient:
         return msg_type, body
 
     @staticmethod
-    def _parse_error(body: bytes) -> str:
+    def _error_from(body: bytes) -> PostgresError:
         parts = body.split(b"\x00")
         fields = {p[:1]: p[1:].decode("utf-8", errors="replace") for p in parts if p}
-        return f"{fields.get(b'S', 'ERROR')}: {fields.get(b'M', 'Unknown error')} ({fields.get(b'D', '')})"
+        message = f"{fields.get(b'S', 'ERROR')}: {fields.get(b'M', 'Unknown error')} ({fields.get(b'D', '')})"
+        return PostgresError(message, sqlstate=fields.get(b"C"))
 
     @staticmethod
     def _parse_row_description(body: bytes) -> list[str]:
@@ -502,51 +524,110 @@ def load_ideas_postgres() -> list[ProductIdea]:
 
 
 def upsert_agent_state_postgres(state: dict[str, Any]) -> None:
-    """Persist the 5-hour autonomous agent loop telemetry into PostgreSQL `agent_runs`."""
-    run_id = state.get("run_id") or "run-active"
-    started_at = state.get("started_at") or datetime.now(timezone.utc).isoformat()
-    updated_at = state.get("updated_at") or datetime.now(timezone.utc).isoformat()
+    """Persist the agent loop telemetry into `agent_runs`."""
     sql = f"""
     INSERT INTO agent_runs (
-        run_id, started_at, updated_at, status, provider, window_cycle,
-        auto_resume_on_refresh, elapsed_seconds, remaining_seconds,
-        max_runtime_seconds, ideas_generated, ideas_count, api_calls,
-        estimated_cost_usd, last_idea_id, stop_reason, state_json
+        run_id, started_at, updated_at, status, model, thinking_level, elapsed_seconds,
+        ideas_generated, ideas_rejected, ideas_count, api_calls, input_tokens, output_tokens,
+        thought_tokens, refresh_waits, resume_at, last_idea_id, stop_reason, state_json
     ) VALUES (
-        {pg_literal(run_id)}, {pg_literal(started_at)}::timestamptz,
-        {pg_literal(updated_at)}::timestamptz, {pg_literal(state.get("status", "RUNNING"))},
-        {pg_literal(state.get("provider", "synthesis"))}, {pg_literal(int(state.get("window_cycle", 1)))},
-        {pg_literal(bool(state.get("auto_resume_on_refresh", True)))},
-        {pg_literal(float(state.get("elapsed_seconds", 0.0)))},
-        {pg_literal(float(state.get("remaining_seconds", 18000.0)))},
-        {pg_literal(int(state.get("max_runtime_seconds", 18000)))},
-        {pg_literal(int(state.get("new_ideas_added_this_run", 0)))},
-        {pg_literal(int(state.get("ideas_count", 0)))},
-        {pg_literal(int(state.get("api_calls", 0)))},
-        {pg_literal(float(state.get("estimated_cost_usd", 0.0)))},
-        {pg_literal(state.get("last_idea_id"))},
-        {pg_literal(state.get("stop_reason", ""))},
-        {pg_literal(state)}
+        {pg_literal(state["run_id"])}, {pg_literal(state["started_at"])}::timestamptz,
+        {pg_literal(state["updated_at"])}::timestamptz, {pg_literal(state["status"])},
+        {pg_literal(state["model"])}, {pg_literal(state["thinking_level"])},
+        {pg_literal(float(state["elapsed_seconds"]))}, {pg_literal(int(state["new_ideas_added_this_run"]))},
+        {pg_literal(int(state["ideas_rejected_this_run"]))}, {pg_literal(int(state["ideas_count"]))},
+        {pg_literal(int(state["api_calls"]))}, {pg_literal(int(state["input_tokens"]))},
+        {pg_literal(int(state["output_tokens"]))}, {pg_literal(int(state["thought_tokens"]))},
+        {pg_literal(int(state["refresh_waits"]))}, {pg_literal(state["resume_at"])}::timestamptz,
+        {pg_literal(state["last_idea_id"])}, {pg_literal(state["stop_reason"])}, {pg_literal(state)}
     )
     ON CONFLICT (run_id) DO UPDATE SET
         updated_at = EXCLUDED.updated_at,
         status = EXCLUDED.status,
-        provider = EXCLUDED.provider,
-        window_cycle = EXCLUDED.window_cycle,
-        auto_resume_on_refresh = EXCLUDED.auto_resume_on_refresh,
         elapsed_seconds = EXCLUDED.elapsed_seconds,
-        remaining_seconds = EXCLUDED.remaining_seconds,
-        max_runtime_seconds = EXCLUDED.max_runtime_seconds,
         ideas_generated = EXCLUDED.ideas_generated,
+        ideas_rejected = EXCLUDED.ideas_rejected,
         ideas_count = EXCLUDED.ideas_count,
         api_calls = EXCLUDED.api_calls,
-        estimated_cost_usd = EXCLUDED.estimated_cost_usd,
+        input_tokens = EXCLUDED.input_tokens,
+        output_tokens = EXCLUDED.output_tokens,
+        thought_tokens = EXCLUDED.thought_tokens,
+        refresh_waits = EXCLUDED.refresh_waits,
+        resume_at = EXCLUDED.resume_at,
         last_idea_id = EXCLUDED.last_idea_id,
         stop_reason = EXCLUDED.stop_reason,
         state_json = EXCLUDED.state_json;
     """
     with PostgresWireClient() as client:
         client.execute(sql)
+
+
+def latest_agent_state() -> dict[str, Any] | None:
+    """Return the telemetry of the most recently updated agent run, if any."""
+    with PostgresWireClient() as client:
+        rows = client.execute("SELECT state_json FROM agent_runs ORDER BY updated_at DESC LIMIT 1;")
+    return json.loads(rows[0]["state_json"]) if rows else None
+
+
+def acquire_agent_lock() -> PostgresWireClient | None:
+    """Take the single-agent lock. Hold the returned connection open; closing it releases the lock."""
+    client = PostgresWireClient()
+    client.connect()
+    rows = client.execute(f"SELECT pg_try_advisory_lock({AGENT_LOCK_KEY}) AS locked;")
+    if rows[0]["locked"] == "t":
+        return client
+    client.close()
+    return None
+
+
+def record_gemini_call(
+    run_id: str,
+    call: GeminiCall,
+    *,
+    outcome: str,
+    idea_id: str | None = None,
+    error: str = "",
+) -> None:
+    """Record one billed Gemini call, keeping its raw answer so rejected output is not lost."""
+    sql = f"""
+    INSERT INTO gemini_calls (
+        run_id, interaction_id, model, thinking_level, outcome, idea_id, input_tokens,
+        output_tokens, thought_tokens, total_tokens, error, raw_text
+    ) VALUES (
+        {pg_literal(run_id)}, {pg_literal(call.interaction_id)}, {pg_literal(call.model)},
+        {pg_literal(config.GEMINI_THINKING_LEVEL)}, {pg_literal(outcome)}, {pg_literal(idea_id)},
+        {pg_literal(call.input_tokens)}, {pg_literal(call.output_tokens)},
+        {pg_literal(call.thought_tokens)}, {pg_literal(call.total_tokens)},
+        {pg_literal(error)}, {pg_literal(call.text)}
+    );
+    """
+    with PostgresWireClient() as client:
+        client.execute(sql)
+
+
+def count_ideas() -> int:
+    with PostgresWireClient() as client:
+        return int(client.execute("SELECT COUNT(*) AS n FROM product_ideas;")[0]["n"])
+
+
+def next_idea_number() -> int:
+    """Return the number after the highest existing IDEA-NNN id."""
+    with PostgresWireClient() as client:
+        rows = client.execute("SELECT COALESCE(MAX(substring(id from '[0-9]+')::int), 0) AS n FROM product_ideas;")
+    return int(rows[0]["n"]) + 1
+
+
+def recent_titles(limit: int) -> list[str]:
+    """Return shortened titles of the newest ideas, for the prompt's do-not-repeat list."""
+    with PostgresWireClient() as client:
+        rows = client.execute(f"SELECT left(title, 80) AS title FROM product_ideas ORDER BY created_at DESC, id DESC LIMIT {int(limit)};")
+    return [r["title"] for r in rows]
+
+
+def naics_counts() -> dict[str, int]:
+    with PostgresWireClient() as client:
+        rows = client.execute("SELECT naics_code, COUNT(*) AS n FROM product_ideas GROUP BY naics_code;")
+    return {r["naics_code"]: int(r["n"]) for r in rows}
 
 
 def get_postgres_status() -> dict[str, Any]:
@@ -562,7 +643,8 @@ def get_postgres_status() -> dict[str, Any]:
                 (SELECT COUNT(*) FROM product_ideas)::int AS product_ideas_count,
                 (SELECT COUNT(*) FROM idea_metrics)::int AS idea_metrics_count,
                 (SELECT COUNT(*) FROM idea_diligence_questions)::int AS idea_diligence_questions_count,
-                (SELECT COUNT(*) FROM agent_runs)::int AS agent_runs_count;
+                (SELECT COUNT(*) FROM agent_runs)::int AS agent_runs_count,
+                (SELECT COUNT(*) FROM gemini_calls)::int AS gemini_calls_count;
             """
         )
     return {

@@ -1,198 +1,208 @@
-"""5-Hour Continuous Autonomous Idea Factory Agent Loop."""
+"""Continuous idea loop: generate with Gemini 4 Argon at High effort, store in PostgreSQL.
+
+The loop runs until told to stop. When the tokens run out it records the wait in PostgreSQL, sleeps
+until they refresh, and resumes. It never falls back to another model or a template engine.
+"""
 from __future__ import annotations
 
-import importlib
 import logging
+import random
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from . import config
-from . import generator as _generator_mod
-from .generator import CreditExhaustedError, active_provider, generate_next_idea
+from .gemini import FatalGeminiError, GeminiCall, TokensExhaustedError, TransientGeminiError
+from .generator import InvalidIdeaError, generate_next_idea
 from .models import ProductIdea
-from .seed_ideas import get_seed_ideas
-from .storage import (
-    init_db,
-    load_ideas,
-    save_agent_state,
-    save_idea,
-    save_ideas_batch,
+from .postgres import (
+    PostgresError,
+    acquire_agent_lock,
+    count_ideas,
+    is_transient_db_error,
+    record_gemini_call,
+    run_migrations,
+    upsert_agent_state_postgres,
+    upsert_ideas_postgres,
 )
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+BACKOFF_BASE_SECONDS = 30.0
+MAX_WAIT_SECONDS = 3600.0  # Also the polling interval when the reset time is unknown.
+RESET_MARGIN_SECONDS = 60.0
 
 
-def ensure_seeded() -> list[ProductIdea]:
-    """Ensure the foundational workspace product blueprints are loaded into the catalog."""
-    init_db()
-    existing = load_ideas()
-    seed = get_seed_ideas()
-    existing_ids = {i.id for i in existing}
-    missing = [s for s in seed if s.id not in existing_ids]
-    if missing:
-        save_ideas_batch(existing + missing)
-        existing = load_ideas()
-    return existing
+class AgentAlreadyRunningError(RuntimeError):
+    """Another agent holds the lock. Two agents would spend tokens on duplicate work."""
+
+
+def backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with jitter, capped at one hour."""
+    delay = BACKOFF_BASE_SECONDS * (2 ** min(attempt, 10))
+    return min(MAX_WAIT_SECONDS, delay * random.uniform(0.9, 1.1))
+
+
+def refresh_wait_seconds(exc: TokensExhaustedError, attempt: int, now: datetime | None = None) -> float:
+    """How long to wait for tokens: the known reset time, the API's hint, or a capped poll."""
+    if exc.resume_at is not None:
+        remaining = (exc.resume_at - (now or datetime.now(timezone.utc))).total_seconds()
+        return max(RESET_MARGIN_SECONDS, remaining + RESET_MARGIN_SECONDS)
+    if exc.kind == "billing":
+        return MAX_WAIT_SECONDS  # Refreshes on the 1st of the month, or whenever credits are added.
+    return max(exc.retry_after or 0.0, min(backoff_seconds(attempt), MAX_WAIT_SECONDS))
 
 
 def run_agent_loop(
     *,
-    max_hours: float = config.AGENT_MAX_HOURS,
     interval_seconds: float = config.AGENT_LOOP_INTERVAL_SECONDS,
     max_iterations: int | None = None,
-    max_credit_usd: float = config.AGENT_MAX_CREDIT_USD,
-    auto_resume_on_refresh: bool = False,
-    refresh_cooldown_seconds: float | None = None,
-    max_refresh_cycles: int | None = None,
     on_idea_added: Callable[[ProductIdea, dict[str, Any]], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
-    """Run the Idea Factory Agent in a continuous loop until the 5-hour window or AI credit limit is reached.
-
-    When `auto_resume_on_refresh=True`, reaching the 5-hour token/credit limit transitions the agent into
-    `WAITING_FOR_5HR_TOKEN_REFRESH`, waits until the 5-hour window refreshes, and resumes generating ideas
-    right where it left off.
-    """
-    ideas = ensure_seeded()
+    """Run until interrupted, or until `max_iterations` ideas have been stored."""
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
-    max_runtime_seconds = int(max_hours * 3600)
-    provider = active_provider()
+    state: dict[str, Any] = {
+        "run_id": run_id,
+        "status": "RUNNING",
+        "model": config.GEMINI_MODEL,
+        "thinking_level": config.GEMINI_THINKING_LEVEL,
+        "started_at": started_at,
+        "iterations": 0,
+        "new_ideas_added_this_run": 0,
+        "ideas_rejected_this_run": 0,
+        "ideas_count": 0,
+        "api_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "thought_tokens": 0,
+        "refresh_waits": 0,
+        "resume_at": None,
+        "last_idea_id": None,
+        "stop_reason": "",
+    }
 
-    iterations = 0
-    new_ideas_added = 0
-    api_calls = 0
-    estimated_cost_usd = 0.0
-    window_cycle = 1
-    status = "RUNNING"
-    stop_reason = ""
-    last_idea_id = max((i.id for i in ideas), default="")
+    def save_state() -> dict[str, Any]:
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        state["elapsed_seconds"] = round(time.monotonic() - t0, 2)
+        try:
+            upsert_agent_state_postgres(state)
+        except (OSError, PostgresError) as exc:
+            logger.warning("Could not save agent state: %s", exc)
+        return dict(state)
 
-    def _snapshot(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        elapsed = round(time.monotonic() - t0, 2)
-        remaining = max(0.0, round(max_runtime_seconds - elapsed, 1))
-        snap = {
-            "run_id": run_id,
-            "status": status,
-            "provider": provider,
-            "started_at": started_at,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "window_cycle": window_cycle,
-            "auto_resume_on_refresh": auto_resume_on_refresh,
-            "elapsed_seconds": elapsed,
-            "remaining_seconds": remaining,
-            "max_runtime_seconds": max_runtime_seconds,
-            "max_hours": max_hours,
-            "iterations": iterations,
-            "new_ideas_added_this_run": new_ideas_added,
-            "ideas_count": len(ideas),
-            "api_calls": api_calls,
-            "estimated_cost_usd": round(estimated_cost_usd, 4),
-            "max_credit_usd": max_credit_usd,
-            "last_idea_id": last_idea_id,
-            "stop_reason": stop_reason,
-        }
-        if extra:
-            snap.update(extra)
-        return snap
+    def wait(status: str, seconds: float, reason: str) -> None:
+        state["status"] = status
+        state["stop_reason"] = reason
+        state["resume_at"] = datetime.fromtimestamp(time.time() + seconds, timezone.utc).isoformat()
+        save_state()
+        logger.warning("%s for %.0fs: %s", status, seconds, reason)
+        sleep(seconds)
+        state["status"] = "RUNNING"
+        state["stop_reason"] = ""
+        state["resume_at"] = None
+        save_state()
 
-    def _wait_for_5hr_refresh(reason: str) -> bool:
-        nonlocal t0, estimated_cost_usd, window_cycle, status, stop_reason
-        if not auto_resume_on_refresh:
-            return False
-        if max_refresh_cycles is not None and window_cycle >= max_refresh_cycles:
-            return False
-        elapsed_in_window = time.monotonic() - t0
-        wait_sec = (
-            refresh_cooldown_seconds
-            if refresh_cooldown_seconds is not None
-            else max(60.0, float(max_runtime_seconds) - elapsed_in_window)
-        )
-        status = "WAITING_FOR_5HR_TOKEN_REFRESH"
-        stop_reason = f"{reason} Waiting {wait_sec:.0f}s for 5-hour token window refresh (cycle {window_cycle})..."
-        save_agent_state(_snapshot({"refresh_wait_seconds": round(wait_sec, 1)}))
-        if wait_sec > 0:
-            time.sleep(wait_sec)
-        window_cycle += 1
-        t0 = time.monotonic()
-        estimated_cost_usd = 0.0
-        status = "RUNNING"
-        stop_reason = ""
-        save_agent_state(_snapshot())
-        return True
-
-    save_agent_state(_snapshot())
-
-    try:
+    def persist(write: Callable[[], T]) -> T:
+        """Retry a database write until it lands. The tokens behind this data are already paid for."""
+        attempt = 0
         while True:
-            elapsed = time.monotonic() - t0
-            if elapsed >= max_runtime_seconds:
-                if _wait_for_5hr_refresh(f"Reached {max_hours:.2f}-hour window limit ({max_runtime_seconds}s)."):
-                    continue
-                status = "COMPLETED_5HR_WINDOW"
-                stop_reason = f"Reached {max_hours:.2f}-hour time limit ({max_runtime_seconds}s)."
-                break
-            if max_iterations is not None and iterations >= max_iterations:
-                status = "COMPLETED_MAX_ITERATIONS"
-                stop_reason = f"Completed requested {max_iterations} loop iterations."
-                break
-            if estimated_cost_usd >= max_credit_usd:
-                if _wait_for_5hr_refresh(f"Consumed 5-hour credit budget (${estimated_cost_usd:.2f} / ${max_credit_usd:.2f})."):
-                    continue
-                status = "CREDIT_LIMIT_REACHED"
-                stop_reason = f"Consumed allocated credit budget (${estimated_cost_usd:.2f} / ${max_credit_usd:.2f})."
-                break
-
             try:
-                ideas = load_ideas()
-                idea, used_provider, call_cost = generate_next_idea(ideas, iteration=iterations)
-                provider = used_provider
-                api_calls += 1
-                estimated_cost_usd += call_cost
-                save_idea(idea)
-                ideas = load_ideas()
-                iterations += 1
-                new_ideas_added += 1
-                last_idea_id = idea.id
-                snap = _snapshot()
-                save_agent_state(snap)
-                if on_idea_added:
-                    on_idea_added(idea, snap)
-            except CreditExhaustedError as exc:
-                if _wait_for_5hr_refresh(str(exc)):
-                    continue
-                status = "CREDIT_LIMIT_REACHED"
-                stop_reason = str(exc)
-                break
-            except Exception as exc:
-                logger.warning("Iteration error (continuing loop): %s", exc)
-                if config.AGENT_STOP_ON_RATE_LIMIT and "429" in str(exc):
-                    if _wait_for_5hr_refresh(f"Rate/token limit reached: {exc}"):
-                        continue
-                    status = "CREDIT_LIMIT_REACHED"
-                    stop_reason = f"Rate/credit limit reached: {exc}"
-                    break
+                return write()
+            except (OSError, PostgresError) as exc:
+                if not is_transient_db_error(exc):
+                    raise
+                wait("WAITING_FOR_DATABASE", backoff_seconds(attempt), f"PostgreSQL unavailable: {exc}")
+                attempt += 1
 
-            # Check if sleeping would exceed the 5-hour window or max_iterations
-            if max_iterations is not None and iterations >= max_iterations:
-                status = "COMPLETED_MAX_ITERATIONS"
-                stop_reason = f"Completed requested {max_iterations} loop iterations."
-                break
-            if (time.monotonic() - t0) + interval_seconds >= max_runtime_seconds:
-                if _wait_for_5hr_refresh(f"Reached {max_hours:.2f}-hour window limit."):
-                    continue
-                status = "COMPLETED_5HR_WINDOW"
-                stop_reason = f"Reached {max_hours:.2f}-hour time limit."
-                break
-            if interval_seconds > 0:
-                time.sleep(interval_seconds)
+    def record_usage(call: GeminiCall) -> None:
+        state["api_calls"] += 1
+        state["input_tokens"] += call.input_tokens
+        state["output_tokens"] += call.output_tokens
+        state["thought_tokens"] += call.thought_tokens
+
+    def reject(call: GeminiCall, outcome: str, error: str) -> None:
+        record_usage(call)
+        state["ideas_rejected_this_run"] += 1
+        persist(lambda: record_gemini_call(run_id, call, outcome=outcome, error=error))
+
+    lock = None
+    exhausted_attempts = 0
+    transient_attempts = 0
+    rejected_attempts = 0
+    try:
+        persist(run_migrations)
+        lock = persist(acquire_agent_lock)
+        if lock is None:
+            raise AgentAlreadyRunningError("Another Idea Factory agent is already running against this database.")
+        state["ideas_count"] = persist(count_ideas)
+        save_state()
+
+        while max_iterations is None or state["iterations"] < max_iterations:
+            try:
+                idea, call = generate_next_idea(iteration=state["iterations"])
+            except TokensExhaustedError as exc:
+                state["refresh_waits"] += 1
+                wait("WAITING_FOR_TOKEN_REFRESH", refresh_wait_seconds(exc, exhausted_attempts), str(exc))
+                exhausted_attempts += 1
+                continue
+            except InvalidIdeaError as exc:
+                reject(exc.call, "invalid_output", str(exc))
+                wait("WAITING_AFTER_INVALID_OUTPUT", backoff_seconds(rejected_attempts), str(exc))
+                rejected_attempts += 1
+                continue
+            except TransientGeminiError as exc:
+                wait("WAITING_AFTER_TRANSIENT_ERROR", backoff_seconds(transient_attempts), str(exc))
+                transient_attempts += 1
+                continue
+            except (OSError, PostgresError) as exc:
+                if not is_transient_db_error(exc):
+                    raise
+                wait("WAITING_FOR_DATABASE", backoff_seconds(transient_attempts), f"PostgreSQL unavailable: {exc}")
+                transient_attempts += 1
+                continue
+
+            exhausted_attempts = transient_attempts = 0
+            try:
+                persist(lambda: upsert_ideas_postgres([idea]))
+            except PostgresError as exc:
+                # A constraint rejected the data itself, for example a slug that already exists.
+                outcome = "duplicate" if exc.sqlstate == "23505" else "invalid_output"
+                reject(call, outcome, str(exc))
+                wait("WAITING_AFTER_INVALID_OUTPUT", backoff_seconds(rejected_attempts), str(exc))
+                rejected_attempts += 1
+                continue
+
+            rejected_attempts = 0
+            record_usage(call)
+            persist(lambda: record_gemini_call(run_id, call, outcome="stored", idea_id=idea.id))
+            state["iterations"] += 1
+            state["new_ideas_added_this_run"] += 1
+            state["last_idea_id"] = idea.id
+            state["ideas_count"] = persist(count_ideas)
+            snapshot = save_state()
+            if on_idea_added:
+                on_idea_added(idea, snapshot)
+            if interval_seconds > 0 and (max_iterations is None or state["iterations"] < max_iterations):
+                sleep(interval_seconds)
+
+        state["status"] = "COMPLETED_MAX_ITERATIONS"
+        state["stop_reason"] = f"Stored the requested {max_iterations} ideas."
     except KeyboardInterrupt:
-        status = "STOPPED_BY_USER"
-        stop_reason = "Interrupted by user (SIGINT)."
-
-    final_state = _snapshot()
-    save_agent_state(final_state)
-    return final_state
-
+        state["status"] = "STOPPED_BY_USER"
+        state["stop_reason"] = "Stopped by signal."
+    except AgentAlreadyRunningError:
+        raise
+    except FatalGeminiError as exc:
+        state["status"] = "FAILED"
+        state["stop_reason"] = str(exc)
+        save_state()
+        raise
+    finally:
+        if lock is not None:
+            lock.close()
+    return save_state()
