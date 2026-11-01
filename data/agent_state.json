@@ -1,0 +1,21 @@
+{
+  "run_id": "run-a859ee24",
+  "status": "RUNNING",
+  "provider": "synthesis",
+  "started_at": "2026-11-01T21:55:00.150206+00:00",
+  "updated_at": "2026-11-01T22:10:40.957843+00:00",
+  "window_cycle": 1,
+  "auto_resume_on_refresh": true,
+  "elapsed_seconds": 940.85,
+  "remaining_seconds": 17059.2,
+  "max_runtime_seconds": 18000,
+  "max_hours": 5.0,
+  "iterations": 47,
+  "new_ideas_added_this_run": 47,
+  "ideas_count": 879,
+  "api_calls": 47,
+  "estimated_cost_usd": 0.0,
+  "max_credit_usd": 50.0,
+  "last_idea_id": "IDEA-879",
+  "stop_reason": ""
+}

@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Idea Factory — 5-Hour Autonomous Venture & Product Engine</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #131a2a;
+      --panel-hover: #1b2438;
+      --border: #26324d;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+      padding: 24px;
+    }
+    header {
+      max-width: 1440px;
+      margin: 0 auto 22px auto;
+      background: linear-gradient(135deg, #131a2a 0%, #0f172a 100%);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 26px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    h1 { font-size: 1.55rem; font-weight: 700; color: #fff; }
+    .subtitle { color: var(--muted); font-size: 0.92rem; margin-top: 4px; }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    button {
+      background: var(--accent);
+      color: #0b0f19;
+      border: none;
+      border-radius: 8px;
+      padding: 9px 15px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.88rem;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.9; }
+    button.secondary { background: #1e293b; color: var(--text); border: 1px solid var(--border); }
+    button.emerald { background: var(--emerald); color: #052e16; }
+    .status-strip {
+      max-width: 1440px;
+      margin: 0 auto 20px auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .stat-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 18px;
+    }
+    .stat-label { font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .stat-val { font-size: 1.45rem; font-weight: 700; color: var(--accent); margin-top: 4px; }
+    .layout {
+      max-width: 1440px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 440px 1fr;
+      gap: 20px;
+    }
+    @media (max-width: 1024px) { .layout { grid-template-columns: 1fr; } }
+    .sidebar, .detail {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .filter-bar { display: flex; gap: 8px; margin-bottom: 14px; }
+    input, select {
+      width: 100%;
+      background: #0b0f19;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.88rem;
+    }
+    .idea-list { display: flex; flex-direction: column; gap: 10px; max-height: 75vh; overflow-y: auto; }
+    .idea-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 13px 15px;
+      cursor: pointer;
+      background: #0e1422;
+      transition: all 0.15s;
+    }
+    .idea-card:hover, .idea-card.active {
+      border-color: var(--accent);
+      background: var(--panel-hover);
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      background: #1e293b;
+      color: var(--accent);
+      margin-right: 6px;
+    }
+    .badge.roi { background: rgba(16, 185, 129, 0.16); color: #34d399; }
+    .sec-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-top: 14px;
+      background: #0e1422;
+    }
+    .sec-title { font-size: 1.02rem; font-weight: 700; color: var(--accent); margin-bottom: 10px; }
+    .q-item { margin-bottom: 12px; }
+    .q-label { font-weight: 600; color: #f8fafc; font-size: 0.9rem; }
+    .q-ans { color: #cbd5e1; font-size: 0.9rem; margin-top: 3px; }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+      gap: 10px;
+      margin: 14px 0;
+    }
+    .m-pill {
+      background: #0b0f19;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      text-align: center;
+    }
+    .m-pill .k { font-size: 0.72rem; color: var(--muted); }
+    .m-pill .v { font-size: 1.05rem; font-weight: 700; color: #34d399; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Idea Factory — Autonomous 5-Hour Venture & Product Engine</h1>
+      <div class="subtitle">Grounded in <code>Claude_Skills_Project</code> + <code>Business_Analyzer_Project</code> Actuarial Survival & Israelsen ROI Math</div>
+    </div>
+    <div class="controls">
+      <label style="font-size:0.82rem; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer;">
+        <input type="checkbox" id="autoFollowNewest" checked style="width:auto;" />
+        Auto-Follow Newest Idea
+      </label>
+      <button onclick="generateOne()">+ Synthesize New Idea Now</button>
+      <button class="emerald" onclick="startLoop()">▶ Start 5-Hour Agent Loop</button>
+      <button class="secondary" onclick="refreshAll()">↻ Refresh</button>
+    </div>
+  </header>
+
+  <section class="status-strip" id="statusStrip"></section>
+  <div id="liveBanner" style="max-width:1440px; margin:0 auto 16px auto; background:#0e1f1c; border:1px solid #10b981; border-radius:10px; padding:10px 16px; font-size:0.86rem; color:#a7f3d0; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+    <span>⚡ Loading live Idea Factory catalog...</span>
+    <span id="lastUpdatedLabel" style="color:var(--muted); font-size:0.78rem;"></span>
+  </div>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="filter-bar" style="flex-direction:column; gap:8px;">
+        <input id="searchBox" type="text" placeholder="Search ideas, NAICS, skills..." oninput="renderList()" />
+        <select id="sortSelect" onchange="renderList()">
+          <option value="newest" selected>Sort: Newest Added First (Live Feed)</option>
+          <option value="roi">Sort: Highest Risk-Adjusted ROI First</option>
+          <option value="survival">Sort: Highest 5-Yr Survival S(60) First</option>
+        </select>
+      </div>
+      <div class="idea-list" id="ideaList"></div>
+    </aside>
+    <section class="detail" id="ideaDetail">
+      <p style="color: var(--muted)">Select a product idea on the left to inspect all 5 sections and 14 investor diligence answers.</p>
+    </section>
+  </main>
+
+  <script src="ideas_data.js"></script>
+  <script>
+    let IDEAS = [];
+    let AGENT_STATE = {};
+    let SELECTED_ID = null;
+    let LAST_HIGHEST_NUM = 0;
+
+    function parseIdeaNum(id) {
+      const m = String(id || '').match(/(\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    }
+
+    function loadScriptBundle() {
+      return new Promise((resolve) => {
+        const old = document.getElementById('liveBundleScript');
+        if (old) old.remove();
+        const s = document.createElement('script');
+        s.id = 'liveBundleScript';
+        s.src = 'ideas_data.js?t=' + Date.now();
+        s.onload = () => resolve(window.__IDEA_FACTORY_BUNDLE__ || null);
+        s.onerror = () => resolve(window.__IDEA_FACTORY_BUNDLE__ || null);
+        document.body.appendChild(s);
+      });
+    }
+
+    async function fetchIdeasAndStatus() {
+      const ts = Date.now();
+      let loadedFromApi = false;
+
+      for (const base of ['', 'http://127.0.0.1:8020']) {
+        if (window.location.protocol === 'file:' && base === '') continue;
+        try {
+          const [ideasRes, statusRes] = await Promise.all([
+            fetch(`${base}/api/ideas?t=${ts}`, { cache: 'no-store' }),
+            fetch(`${base}/api/status?t=${ts}`, { cache: 'no-store' }),
+          ]);
+          if (ideasRes.ok && statusRes.ok) {
+            const ideasData = await ideasRes.json();
+            const statusData = await statusRes.json();
+            IDEAS = ideasData.ideas || [];
+            AGENT_STATE = statusData || {};
+            loadedFromApi = true;
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!loadedFromApi) {
+        const bundle = await loadScriptBundle();
+        if (bundle && Array.isArray(bundle.ideas)) {
+          IDEAS = bundle.ideas;
+          AGENT_STATE = bundle.state || {};
+        }
+      }
+
+      const newest = [...IDEAS].sort((a, b) => parseIdeaNum(b.id) - parseIdeaNum(a.id))[0];
+      const highestNum = newest ? parseIdeaNum(newest.id) : 0;
+      const autoFollow = document.getElementById('autoFollowNewest')?.checked;
+
+      if (!SELECTED_ID && newest) {
+        SELECTED_ID = newest.id;
+      } else if (autoFollow && highestNum > LAST_HIGHEST_NUM && newest) {
+        SELECTED_ID = newest.id;
+      }
+      if (highestNum > LAST_HIGHEST_NUM) {
+        LAST_HIGHEST_NUM = highestNum;
+      }
+
+      renderStatus(newest);
+      renderList();
+      renderDetail();
+    }
+
+    function renderStatus(newest) {
+      const st = AGENT_STATE || {};
+      const meanRoi = IDEAS.length ? (IDEAS.reduce((s, i) => s + i.roi_score, 0) / IDEAS.length).toFixed(1) : '–';
+      const meanS5 = IDEAS.length ? (IDEAS.reduce((s, i) => s + i.survival_5yr * 100, 0) / IDEAS.length).toFixed(1) + '%' : '–';
+      document.getElementById('statusStrip').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Total Product Ideas</div><div class="stat-val">${IDEAS.length}</div></div>
+        <div class="stat-card"><div class="stat-label">Newest Idea ID</div><div class="stat-val" style="color:var(--emerald)">${newest ? newest.id : '–'}</div></div>
+        <div class="stat-card"><div class="stat-label">Mean Risk-Adjusted ROI</div><div class="stat-val">${meanRoi} / 100</div></div>
+        <div class="stat-card"><div class="stat-label">Mean 5-Yr Survival S(60)</div><div class="stat-val">${meanS5}</div></div>
+        <div class="stat-card"><div class="stat-label">5-Hr Agent Status</div><div class="stat-val">${st.status || 'RUNNING'}</div></div>
+        <div class="stat-card"><div class="stat-label">Elapsed / 5-Hr Budget</div><div class="stat-val">${Math.round(st.elapsed_seconds || 0)}s / ${st.max_runtime_seconds || 18000}s</div></div>
+      `;
+      if (newest) {
+        document.getElementById('liveBanner').innerHTML = `
+          <span>🟢 <strong>Latest Idea Generated:</strong> <a href="#" onclick="selectIdea('${newest.id}'); return false;" style="color:#34d399; text-decoration:underline;">${newest.id} — ${newest.title}</a> (ROI ${newest.roi_score.toFixed(1)} | NAICS ${newest.naics_code})</span>
+          <span style="color:var(--muted); font-size:0.78rem;">Auto-refreshing every 4s · Last synced: ${new Date().toLocaleTimeString()}</span>
+        `;
+      }
+    }
+
+    function renderList() {
+      const q = (document.getElementById('searchBox').value || '').toLowerCase();
+      const sortMode = document.getElementById('sortSelect')?.value || 'newest';
+      const filtered = IDEAS.filter(i =>
+        !q || i.title.toLowerCase().includes(q) || i.summary.toLowerCase().includes(q) ||
+        i.category.toLowerCase().includes(q) || i.naics_code.toLowerCase().includes(q) ||
+        i.id.toLowerCase().includes(q)
+      );
+      filtered.sort((a, b) => {
+        if (sortMode === 'newest') return parseIdeaNum(b.id) - parseIdeaNum(a.id);
+        if (sortMode === 'survival') return b.survival_5yr - a.survival_5yr || b.roi_score - a.roi_score;
+        return b.roi_score - a.roi_score || parseIdeaNum(b.id) - parseIdeaNum(a.id);
+      });
+      document.getElementById('ideaList').innerHTML = filtered.map(i => {
+        const isNew = parseIdeaNum(i.id) > 20;
+        return `
+        <div class="idea-card ${i.id === SELECTED_ID ? 'active' : ''}" onclick="selectIdea('${i.id}')">
+          <div>
+            ${isNew ? '<span class="badge" style="background:#065f46; color:#6ee7b7;">NEW</span>' : ''}
+            <span class="badge">${i.id}</span>
+            <span class="badge roi">ROI ${i.roi_score.toFixed(1)}</span>
+            <span class="badge">NAICS ${i.naics_code}</span>
+          </div>
+          <div style="font-weight:700; margin-top:6px; color:#fff;">${i.title}</div>
+          <div style="font-size:0.82rem; color:var(--muted); margin-top:4px;">${i.tagline}</div>
+        </div>
+      `;
+      }).join('');
+    }
+
+    function selectIdea(id) {
+      SELECTED_ID = id;
+      renderList();
+      renderDetail();
+    }
+
+    function renderDetail() {
+      const i = IDEAS.find(x => x.id === SELECTED_ID);
+      if (!i) return;
+      document.getElementById('ideaDetail').innerHTML = `
+        <div>
+          <span class="badge roi">Risk-Adjusted ROI: ${i.roi_score.toFixed(1)} / 100</span>
+          <span class="badge">${i.category}</span>
+          <span class="badge">NAICS ${i.naics_code} (${i.industry_name})</span>
+          <span class="badge">${i.target_metro}</span>
+        </div>
+        <h2 style="margin-top:10px; color:#fff;">${i.id}: ${i.title}</h2>
+        <p style="color:var(--accent); font-weight:600; margin-top:4px;">${i.tagline}</p>
+        <p style="margin-top:10px; color:#cbd5e1;">${i.summary}</p>
+        <div style="margin-top:10px; font-size:0.82rem; color:var(--muted);">
+          <strong>Skills:</strong> ${(i.referenced_skills || []).join(', ')} &nbsp;|&nbsp;
+          <strong>Projects:</strong> ${(i.referenced_projects || []).join(', ')} &nbsp;|&nbsp;
+          <strong>Patterns:</strong> ${(i.pattern_ids || []).join(', ')}
+        </div>
+        <div class="metrics-grid">
+          <div class="m-pill"><div class="k">5-Yr Survival S(60)</div><div class="v">${(i.survival_5yr * 100).toFixed(1)}%</div></div>
+          <div class="m-pill"><div class="k">3-Yr Projected IRR</div><div class="v">${i.projected_3yr_irr_pct.toFixed(1)}%</div></div>
+          <div class="m-pill"><div class="k">LTV : CAC Ratio</div><div class="v">${i.ltv_cac_ratio.toFixed(1)}x</div></div>
+          <div class="m-pill"><div class="k">CAC Payback</div><div class="v">${i.payback_months.toFixed(1)} mos</div></div>
+          <div class="m-pill"><div class="k">Gross Margin</div><div class="v">${i.gross_margin_pct.toFixed(0)}%</div></div>
+          <div class="m-pill"><div class="k">Founder Fit</div><div class="v">${i.founder_fit_score.toFixed(0)}/100</div></div>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title">1. Product & Problem-Solving</div>
+          <div class="q-item"><div class="q-label">• How acute is the problem?</div><div class="q-ans">${i.product_and_problem_solving.acuteness_of_problem}</div></div>
+          <div class="q-item"><div class="q-label">• Is the solution 10x better?</div><div class="q-ans">${i.product_and_problem_solving.ten_x_better_solution}</div></div>
+          <div class="q-item"><div class="q-label">• What are the usage and retention metrics?</div><div class="q-ans">${i.product_and_problem_solving.usage_and_retention_metrics}</div></div>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title">2. Market & Competition</div>
+          <div class="q-item"><div class="q-label">• How big is the market and is it growing?</div><div class="q-ans">${i.market_and_competition.tam_and_growth_tailwinds}</div></div>
+          <div class="q-item"><div class="q-label">• Who is the competition and what is the "edge"?</div><div class="q-ans">${i.market_and_competition.competition_and_defensible_edge}</div></div>
+          <div class="q-item"><div class="q-label">• Why do customers switch?</div><div class="q-ans">${i.market_and_competition.why_customers_switch}</div></div>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title">3. Business Model & Traction</div>
+          <div class="q-item"><div class="q-label">• What does customer acquisition look like?</div><div class="q-ans">${i.business_model_and_traction.cac_ltv_and_payback}</div></div>
+          <div class="q-item"><div class="q-label">• What is the nature of the revenue?</div><div class="q-ans">${i.business_model_and_traction.nature_of_revenue}</div></div>
+          <div class="q-item"><div class="q-label">• Who are the actual paying customers?</div><div class="q-ans">${i.business_model_and_traction.actual_paying_customers}</div></div>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title">4. Financials & Runway</div>
+          <div class="q-item"><div class="q-label">• What is the burn rate and runway?</div><div class="q-ans">${i.financials_and_runway.burn_rate_and_runway}</div></div>
+          <div class="q-item"><div class="q-label">• Are unit economics improving?</div><div class="q-ans">${i.financials_and_runway.unit_economics_scaling}</div></div>
+          <div class="q-item"><div class="q-label">• What are the fundraising and cap table realities?</div><div class="q-ans">${i.financials_and_runway.fundraising_and_cap_table}</div></div>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title">5. Team & Execution</div>
+          <div class="q-item"><div class="q-label">• Do they have founder-product fit?</div><div class="q-ans">${i.team_and_execution.founder_product_fit}</div></div>
+          <div class="q-item"><div class="q-label">• How do they handle pressure and pivot?</div><div class="q-ans">${i.team_and_execution.pressure_and_pivot_playbook}</div></div>
+        </div>
+      `;
+    }
+
+    async function generateOne() {
+      for (const base of ['', 'http://127.0.0.1:8020']) {
+        if (window.location.protocol === 'file:' && base === '') continue;
+        try {
+          const res = await fetch(`${base}/api/generate-one`, { method: 'POST' });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.idea) SELECTED_ID = data.idea.id;
+            break;
+          }
+        } catch (_) {}
+      }
+      await refreshAll();
+    }
+
+    async function startLoop() {
+      for (const base of ['', 'http://127.0.0.1:8020']) {
+        if (window.location.protocol === 'file:' && base === '') continue;
+        try {
+          const res = await fetch(`${base}/api/start-loop`, { method: 'POST' });
+          if (res.ok) break;
+        } catch (_) {}
+      }
+      await refreshAll();
+    }
+
+    async function refreshAll() {
+      await fetchIdeasAndStatus();
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 4000);
+  </script>
+</body>
+</html>
+
